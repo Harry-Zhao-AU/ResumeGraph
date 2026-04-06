@@ -44,40 +44,35 @@ def get_employees(
         return _similar_employees(similar_to)
 
     # Build dynamic Cypher query based on filters
-    conditions = []
+    match_clauses = []
+    where_parts = []
     params: dict = {}
 
     if skill:
-        conditions.append("(e)-[:HAS_SKILL]->(s_filter {name: $skill})")
-        params["skill"] = skill
+        # Semantic skill search: find the skill + any RELATED_TO skills, then match employees
+        related_skills = _get_related_skills(skill)
+        match_clauses.append("MATCH (e)-[:HAS_SKILL]->(s_filter)")
+        where_parts.append("s_filter.name IN $skill_names")
+        params["skill_names"] = related_skills
+    else:
+        # Ensure we only get entities that have HAS_SKILL (i.e., employees)
+        match_clauses.append("MATCH (e)-[:HAS_SKILL]->()")
+
     if company:
-        conditions.append("(e)-[:WORKED_AT]->(c_filter {name: $company})")
+        match_clauses.append("MATCH (e)-[:WORKED_AT]->(c_filter {name: $company})")
         params["company"] = company
     if certification:
-        conditions.append("(e)-[:HAS_CERTIFICATION]->(cert_filter {name: $certification})")
+        match_clauses.append("MATCH (e)-[:HAS_CERTIFICATION]->(cert_filter {name: $certification})")
         params["certification"] = certification
     if city:
-        conditions.append("(e)-[:LOCATED_IN]->(city_filter {name: $city})")
+        match_clauses.append("MATCH (e)-[:LOCATED_IN]->(city_filter {name: $city})")
         params["city"] = city
     if name:
-        conditions.append("e.name CONTAINS $name")
+        where_parts.append("e.name CONTAINS $name")
         params["name"] = name
     if department:
-        conditions.append("e.department CONTAINS $department")
+        where_parts.append("e.department CONTAINS $department")
         params["department"] = department
-
-    # Match employees with optional filters
-    match_clauses = ["MATCH (e)"]
-    where_parts = []
-
-    for cond in conditions:
-        if cond.startswith("("):
-            match_clauses.append(f"MATCH {cond}")
-        else:
-            where_parts.append(cond)
-
-    # Ensure we only get entities that have HAS_SKILL (i.e., employees, not skills/companies)
-    match_clauses.append("MATCH (e)-[:HAS_SKILL]->()")
 
     cypher = "\n".join(match_clauses)
     if where_parts:
@@ -178,6 +173,18 @@ RETURN $source AS name, COLLECT(DISTINCT s.name) AS skills
             skills=[SkillEntry(name=s, category="", level="", years=0) for s in (r.get("skills") or []) if s],
         )
     ]
+
+
+def _get_related_skills(skill: str) -> list[str]:
+    """Get a skill name + all semantically related skill names via RELATED_TO edges."""
+    result = query_with_cypher(
+        "MATCH (a {name: $skill})-[:RELATED_TO]-(b) RETURN COLLECT(DISTINCT b.name) AS related",
+        {"skill": skill},
+    )
+    related = result[0]["related"] if result and result[0].get("related") else []
+    # Always include the original skill
+    all_skills = [skill] + [r for r in related if r]
+    return list(set(all_skills))
 
 
 def _safe_int(val) -> int | None:

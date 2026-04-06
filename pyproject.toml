@@ -27,6 +27,7 @@ dependencies = [
     # HTTP client (for MCP -> API calls)
     "httpx>=0.28",
     "pymupdf>=1.27.2.2",
+    "sentence-transformers>=5.3.0",
 ]
 
 [project.optional-dependencies]
