@@ -1,17 +1,20 @@
 """CLI: Read PDFs from data/resumes/, feed into LlamaIndex PropertyGraphIndex -> Neo4j.
 
-Usage: python -m resume_graph.ingest
+Usage:
+  python -m resume_graph.ingest           # ingest (appends to existing graph)
+  python -m resume_graph.ingest --clean   # clear graph first, then ingest
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from llama_index.core import Document
 from llama_index.readers.file import PyMuPDFReader
 
 from resume_graph.graph.index import build_index
-from resume_graph.graph.store import close_graph_store
+from resume_graph.graph.store import get_graph_store, close_graph_store
 
 RESUMES_DIR = Path("data/resumes")
 
@@ -46,10 +49,23 @@ def load_resume_documents() -> list[Document]:
     return documents
 
 
+def clear_graph() -> None:
+    """Delete all nodes and relationships from Neo4j."""
+    store = get_graph_store()
+    print("Clearing all nodes and relationships from Neo4j...")
+    store.structured_query("MATCH (n) DETACH DELETE n")
+    print("Graph cleared.")
+
+
 def main() -> None:
+    clean = "--clean" in sys.argv
+
     print("=" * 60)
     print("Ingesting resume PDFs into Neo4j via LlamaIndex...")
     print("=" * 60)
+
+    if clean:
+        clear_graph()
 
     documents = load_resume_documents()
     if not documents:
