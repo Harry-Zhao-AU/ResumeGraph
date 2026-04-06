@@ -54,21 +54,21 @@ API server = single backend with all logic. MCP server = thin stdio adapter that
 
 ## How LlamaIndex Fits
 
-### PropertyGraphIndex + Neo4jPropertyGraphStore
-LlamaIndex's `PropertyGraphIndex` is the core of this project. Instead of writing manual Cypher for ingestion:
+LlamaIndex handles two things in this project:
 
-1. **Define a schema** with `SchemaLLMPathExtractor` — 6 entity types (Employee, Skill, Company, University, Certification, City) and 6 relationship types
-2. **Feed generated resume text** → LlamaIndex uses the LLM to extract entities + relationships automatically
-3. **Store in Neo4j** via `Neo4jPropertyGraphStore` — nodes and edges created automatically
-4. **Query** via both:
-   - **Cypher-based retrieval** (`CypherRetriever`) — structured graph queries
-   - **Natural language graph RAG** (`TextToCypherRetriever`) — LLM translates questions to Cypher
+### 1. Ingestion: PDF text -> graph entities (SimpleLLMPathExtractor)
+- `PyMuPDFReader` extracts raw text from resume PDFs (no LLM)
+- `SimpleLLMPathExtractor` sends the text to Azure OpenAI with a custom prompt
+- The LLM reads the resume and extracts structured triplets: `(Priya Nair, HAS_SKILL, Java)`
+- `PropertyGraphIndex` stores these triplets as nodes + edges in Neo4j via `Neo4jPropertyGraphStore`
+- Duplicate entities (e.g. "Docker" from 18 resumes) are automatically merged into one node
 
-### Why this is better than raw Cypher ingestion
-- Schema-driven extraction is more maintainable than prompt-engineering JSON output
-- LlamaIndex handles entity deduplication, relationship normalization
-- `TextToCypherRetriever` lets MCP tools accept natural language questions — more flexible than rigid parameter-based tools
-- Built-in integration with Neo4j property graph store — no manual driver code for writes
+### 2. Querying: Natural language -> Cypher (TextToCypherRetriever)
+- `TextToCypherRetriever` takes a question like "Who knows Kubernetes in Melbourne?"
+- It sends the question + Neo4j schema to the LLM
+- The LLM generates a Cypher query: `MATCH (e)-[:HAS_SKILL]->(s {name: 'Kubernetes'}), (e)-[:LOCATED_IN]->(c {name: 'Melbourne'}) RETURN e.name`
+- LlamaIndex executes the Cypher and returns results
+- Also supports raw Cypher via `graph_store.structured_query()` for the `/employees` endpoint
 
 ---
 
@@ -260,52 +260,88 @@ def render_pdf(markdown_text: str, output_path: Path, style: str = "random") -> 
 
 Output: `data/resumes/*.pdf` (30 files, varied styles)
 
-### Ingestion into LlamaIndex (`ingest.py`)
+### Ingestion into Neo4j (`ingest.py`)
 
-The PDFs are the source of truth for LlamaIndex. The ingestion pipeline:
-1. Read each PDF from `data/resumes/`
-2. Extract text (LlamaIndex has built-in PDF readers)
-3. Feed into `PropertyGraphIndex.from_documents()` with `SchemaLLMPathExtractor`
-4. LlamaIndex extracts Employee/Skill/Company/University/Certification/City entities and relationships -> Neo4j
+The ingestion pipeline has two stages — one is plain text extraction, the other uses LLM:
 
-This simulates a real workflow where you'd ingest actual employee resumes.
+```
+PDF file
+  -> Stage 1: PyMuPDFReader (NO LLM — just extracts raw text from PDF)
+  -> Raw text: "Priya Nair, Senior Backend Engineer at Canva.
+                Skills: Java, Spring Boot, Kafka..."
+
+  -> Stage 2: SimpleLLMPathExtractor (USES LLM to understand the text)
+  -> Graph triplets:
+       (Priya Nair, HAS_SKILL, Java)
+       (Priya Nair, HAS_SKILL, Spring Boot)
+       (Priya Nair, WORKED_AT, Canva)
+       (Priya Nair, LOCATED_IN, Sydney)
+
+  -> Stage 3: Neo4jPropertyGraphStore (stores triplets as nodes + edges)
+```
+
+**Stage 1 — PDF to text** (`PyMuPDFReader`): No LLM involved. Just reads the PDF bytes and
+extracts the text content. Each PDF becomes a LlamaIndex `Document`.
+
+**Stage 2 — Text to graph triplets** (`SimpleLLMPathExtractor`): This is where the LLM
+comes in. It reads the resume text and *understands* who the person is, what skills they
+have, where they worked, etc. It outputs structured triplets like
+`(entity, RELATIONSHIP, entity)`. A custom prompt constrains extraction to our 6 entity
+types and 6 relationship types.
+
+**Stage 3 — Triplets to Neo4j** (`PropertyGraphIndex`): Takes the triplets and creates/merges
+nodes and edges in Neo4j. Duplicate entities (e.g. "Docker" from multiple resumes) are
+merged into a single node.
+
+**Why SimpleLLMPathExtractor instead of SchemaLLMPathExtractor?**
+`SchemaLLMPathExtractor` uses `response_format` with a JSON schema for structured output,
+but LlamaIndex generates a schema that newer Azure OpenAI models (like gpt-5.4-mini) reject
+because it's missing `additionalProperties: false`. `SimpleLLMPathExtractor` avoids this by
+using plain text prompts — the LLM returns triplets as text lines, which we parse. The
+tradeoff: entity names and relationships are extracted, but not entity properties (like skill
+level or years). Good enough for graph connectivity.
 
 ---
 
 ## LlamaIndex Pipeline (`graph/index.py`)
 
 ```python
-from llama_index.core.indices.property_graph import PropertyGraphIndex, SchemaLLMPathExtractor
+from llama_index.core.indices.property_graph import PropertyGraphIndex, SimpleLLMPathExtractor
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+from llama_index.readers.file import PyMuPDFReader
+from llama_index.llms.azure_openai import AzureOpenAI
 
-# 1. Setup store
+# 1. Read PDFs into Documents (no LLM)
+reader = PyMuPDFReader()
+documents = [reader.load_data(path) for path in pdf_paths]
+
+# 2. Setup Neo4j store
 graph_store = Neo4jPropertyGraphStore(
     url="bolt://localhost:7687",
     username="neo4j",
     password="resumegraph_dev",
 )
 
-# 2. Setup extractor with our schema
-kg_extractor = SchemaLLMPathExtractor(
-    llm=azure_openai_llm,
-    strict=True,
-    graph_schema=resume_schema,  # from graph/schema.py
+# 3. Setup LLM extractor with custom prompt for our entity/relation types
+kg_extractor = SimpleLLMPathExtractor(
+    llm=AzureOpenAI(engine="gpt-5.4-mini", ...),
+    extract_prompt=EXTRACT_PROMPT,  # constrains to Employee, Skill, Company, etc.
+    parse_fn=_parse_triplets,       # parses "(entity, REL, entity)" lines
+    max_paths_per_chunk=20,
 )
 
-# 3. Build index from resume documents
+# 4. Build index — runs the extraction + stores in Neo4j
 index = PropertyGraphIndex.from_documents(
-    documents=resume_docs,
-    graph_store=graph_store,
+    documents=documents,
+    property_graph_store=graph_store,
     kg_extractors=[kg_extractor],
-    show_progress=True,
 )
 
-# 4. Query (two modes)
-# Structured: custom Cypher
-cypher_retriever = index.as_retriever(retriever_mode="cypher")
-
+# 5. Query (two modes)
 # Natural language: LLM generates Cypher from question
-nl_retriever = index.as_retriever(retriever_mode="text_to_cypher")
+retriever = TextToCypherRetriever(graph_store=graph_store, llm=llm)
+# Raw Cypher: direct structured query
+result = graph_store.structured_query("MATCH (e)-[:HAS_SKILL]->(s) ...")
 ```
 
 ---

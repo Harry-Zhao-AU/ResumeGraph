@@ -26,6 +26,7 @@ dependencies = [
     "openai>=1.0",
     # HTTP client (for MCP -> API calls)
     "httpx>=0.28",
+    "pymupdf>=1.27.2.2",
 ]
 
 [project.optional-dependencies]
