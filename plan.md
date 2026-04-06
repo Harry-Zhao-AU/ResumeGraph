@@ -134,7 +134,7 @@ services:
       - "7474:7474"   # Browser UI
       - "7687:7687"   # Bolt protocol
     environment:
-      NEO4J_AUTH: neo4j/resumegraph_dev
+      NEO4J_AUTH: neo4j/<NEO4J_PASSWORD>
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j_data:/data
@@ -319,7 +319,7 @@ documents = [reader.load_data(path) for path in pdf_paths]
 graph_store = Neo4jPropertyGraphStore(
     url="bolt://localhost:7687",
     username="neo4j",
-    password="resumegraph_dev",
+    password="<NEO4J_PASSWORD>",
 )
 
 # 3. Setup LLM extractor with custom prompt for our entity/relation types

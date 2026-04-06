@@ -164,7 +164,7 @@ Then ask Claude: "Find employees who know Kubernetes in Melbourne"
 
 ## Neo4j Browser
 
-Open http://localhost:7474 (login: `neo4j` / `resumegraph_dev`)
+Open http://localhost:7474 (login with credentials from your `.env`)
 
 Useful queries:
 

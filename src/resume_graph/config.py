@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "resumegraph_dev"
+    neo4j_password: str = ""
 
     # Azure OpenAI
     azure_openai_endpoint: str = ""
